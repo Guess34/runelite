@@ -24,7 +24,10 @@
  */
 package net.runelite.client.externalplugins;
 
+import com.google.common.base.Strings;
+import com.google.common.base.Throwables;
 import com.google.common.collect.HashMultimap;
+import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.Lists;
 import com.google.common.collect.Multimap;
@@ -41,26 +44,34 @@ import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collection;
+import java.util.Collections;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Random;
 import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 import java.util.function.Function;
+import java.util.stream.Collectors;
 import javax.annotation.Nullable;
 import javax.inject.Inject;
 import javax.inject.Named;
+import javax.inject.Provider;
 import javax.inject.Singleton;
 import javax.swing.SwingUtilities;
+import lombok.Getter;
 import lombok.extern.slf4j.Slf4j;
+import net.runelite.client.Notifier;
 import net.runelite.client.RuneLite;
 import net.runelite.client.config.ConfigManager;
 import net.runelite.client.config.RuneLiteConfig;
 import net.runelite.client.eventbus.EventBus;
 import net.runelite.client.eventbus.Subscribe;
 import net.runelite.client.events.ExternalPluginsChanged;
+import net.runelite.client.events.PluginHubStatusChanged;
 import net.runelite.client.events.ProfileChanged;
 import net.runelite.client.plugins.Plugin;
 import net.runelite.client.plugins.PluginInstantiationException;
@@ -79,6 +90,7 @@ import okhttp3.Response;
 public class ExternalPluginManager
 {
 	private static final String PLUGIN_LIST_KEY = "externalPlugins";
+	private static final int STATUS_CHECK_INTERVAL_MINUTES = 30;
 	private static Class<? extends Plugin>[] builtinExternals = null;
 
 	@Inject
@@ -92,6 +104,13 @@ public class ExternalPluginManager
 	private final EventBus eventBus;
 	private final OkHttpClient okHttpClient;
 	private final Gson gson;
+	private final Provider<Notifier> notifier;
+	private final Provider<RuneLiteConfig> runeLiteConfig;
+
+	private final Map<String, String> loadFailures = new ConcurrentHashMap<>();
+
+	@Getter
+	private volatile List<PluginHubStatus> pluginHubStatus = Collections.emptyList();
 
 	@Inject
 	private ExternalPluginManager(
@@ -101,7 +120,9 @@ public class ExternalPluginManager
 		PluginManager pluginManager,
 		EventBus eventBus,
 		OkHttpClient okHttpClient,
-		Gson gson
+		Gson gson,
+		Provider<Notifier> notifier,
+		Provider<RuneLiteConfig> runeLiteConfig
 	)
 	{
 		this.configManager = configManager;
@@ -111,9 +132,13 @@ public class ExternalPluginManager
 		this.eventBus = eventBus;
 		this.okHttpClient = okHttpClient;
 		this.gson = gson;
+		this.notifier = notifier;
+		this.runeLiteConfig = runeLiteConfig;
 
 		executor.scheduleWithFixedDelay(() -> externalPluginClient.submitPlugins(getInstalledExternalPlugins()),
 			new Random().nextInt(60), 180, TimeUnit.MINUTES);
+		executor.scheduleWithFixedDelay(this::checkPluginHubStatus,
+			STATUS_CHECK_INTERVAL_MINUTES, STATUS_CHECK_INTERVAL_MINUTES, TimeUnit.MINUTES);
 	}
 
 	public void loadExternalPlugins() throws PluginInstantiationException
@@ -125,12 +150,14 @@ public class ExternalPluginManager
 			// builtin external's don't actually have a manifest or a separate classloader...
 			pluginManager.loadPlugins(Lists.newArrayList(builtinExternals), null);
 		}
+
+		executor.schedule(this::checkPluginHubStatus, 10, TimeUnit.SECONDS);
 	}
 
 	@Subscribe
 	public void onProfileChanged(ProfileChanged profileChanged)
 	{
-		executor.submit(this::refreshPlugins);
+		executor.submit(this::refreshPluginsAndStatus);
 	}
 
 	private void refreshPlugins()
@@ -250,6 +277,7 @@ public class ExternalPluginManager
 					catch (IOException | VerificationException e)
 					{
 						externalPlugins.remove(jarData);
+						loadFailures.put(jarData.getInternalName(), "Download failed: " + describe(e));
 						log.error("Unable to download external plugin \"{}\"", jarData.getInternalName(), e);
 					}
 				}
@@ -345,6 +373,8 @@ public class ExternalPluginManager
 							}
 						});
 					}
+
+					loadFailures.remove(jarData.getInternalName());
 				}
 				catch (ThreadDeath e)
 				{
@@ -352,6 +382,7 @@ public class ExternalPluginManager
 				}
 				catch (Throwable e)
 				{
+					loadFailures.put(jarData.getInternalName(), "Failed to start: " + describe(e));
 					log.warn("Unable to start or load external plugin \"{}\"", jarData.getInternalName(), e);
 					if (newPlugins != null)
 					{
@@ -395,6 +426,136 @@ public class ExternalPluginManager
 		}
 	}
 
+	private void refreshPluginsAndStatus()
+	{
+		refreshPlugins();
+		checkPluginHubStatus();
+	}
+
+	private void checkPluginHubStatus()
+	{
+		if (safeMode)
+		{
+			return;
+		}
+
+		List<String> installed = getInstalledExternalPlugins();
+		List<PluginHubStatus> status = new ArrayList<>();
+
+		if (!installed.isEmpty())
+		{
+			PluginHubManifest.ManifestFull manifest;
+			try
+			{
+				manifest = externalPluginClient.downloadManifestFull();
+			}
+			catch (IOException | VerificationException e)
+			{
+				log.debug("Unable to check plugin hub status", e);
+				return;
+			}
+
+			Map<String, PluginHubManifest.JarData> latestJars = manifest.getJars().stream()
+				.collect(Collectors.toMap(PluginHubManifest.JarData::getInternalName, Function.identity(), (a, b) -> a));
+			Map<String, PluginHubManifest.DisplayData> displays = manifest.getDisplay().stream()
+				.collect(Collectors.toMap(PluginHubManifest.DisplayData::getInternalName, Function.identity(), (a, b) -> a));
+
+			Map<String, PluginHubManifest.JarData> loadedJars = new HashMap<>();
+			for (Plugin p : pluginManager.getPlugins())
+			{
+				PluginHubManifest.JarData jd = getJarData(p.getClass());
+				if (jd != null)
+				{
+					loadedJars.put(jd.getInternalName(), jd);
+				}
+			}
+
+			for (String name : installed)
+			{
+				PluginHubManifest.DisplayData display = displays.get(name);
+				if (display == null)
+				{
+					continue;
+				}
+
+				String displayName = display.getDisplayName();
+				PluginHubManifest.JarData latest = latestJars.get(name);
+				PluginHubManifest.JarData loaded = loadedJars.get(name);
+
+				if (latest == null)
+				{
+					String reason = !Strings.isNullOrEmpty(display.getUnavailableReason())
+						? display.getUnavailableReason()
+						: "Not available for this version of RuneLite.";
+					status.add(new PluginHubStatus(name, displayName, PluginHubStatus.State.UNAVAILABLE, reason));
+				}
+				else if (loaded != null)
+				{
+					if (!loaded.getJarHash().equals(latest.getJarHash()))
+					{
+						status.add(new PluginHubStatus(name, displayName, PluginHubStatus.State.UPDATE_AVAILABLE,
+							"Version " + display.getVersion() + " is on the Plugin Hub."));
+					}
+				}
+				else if (loadFailures.containsKey(name))
+				{
+					status.add(new PluginHubStatus(name, displayName, PluginHubStatus.State.FAILED, loadFailures.get(name)));
+				}
+			}
+		}
+
+		List<PluginHubStatus> previous = pluginHubStatus;
+		if (status.equals(previous))
+		{
+			return;
+		}
+
+		pluginHubStatus = ImmutableList.copyOf(status);
+		eventBus.post(new PluginHubStatusChanged());
+
+		List<PluginHubStatus> added = status.stream()
+			.filter(s -> !previous.contains(s))
+			.collect(Collectors.toList());
+		if (!added.isEmpty())
+		{
+			notifier.get().notify(runeLiteConfig.get().pluginHubStatusNotification(), describeStatus(added));
+		}
+	}
+
+	private static String describeStatus(List<PluginHubStatus> status)
+	{
+		long updates = status.stream().filter(s -> !s.isProblem()).count();
+		List<String> problems = status.stream()
+			.filter(PluginHubStatus::isProblem)
+			.map(PluginHubStatus::getDisplayName)
+			.collect(Collectors.toList());
+
+		StringBuilder sb = new StringBuilder();
+		if (updates == 1)
+		{
+			sb.append("1 Plugin Hub update is ready.");
+		}
+		else if (updates > 1)
+		{
+			sb.append(updates).append(" Plugin Hub updates are ready.");
+		}
+		if (!problems.isEmpty())
+		{
+			if (sb.length() > 0)
+			{
+				sb.append(' ');
+			}
+			sb.append(String.join(", ", problems)).append(" can't load.");
+		}
+		return sb.toString();
+	}
+
+	private static String describe(Throwable e)
+	{
+		Throwable root = Throwables.getRootCause(e);
+		return root.getMessage() == null ? root.getClass().getSimpleName() : root.getClass().getSimpleName() + ": " + root.getMessage();
+	}
+
 	public List<String> getInstalledExternalPlugins()
 	{
 		String externalPluginsStr = configManager.getConfiguration(RuneLiteConfig.GROUP_NAME, PLUGIN_LIST_KEY);
@@ -407,7 +568,7 @@ public class ExternalPluginManager
 		if (plugins.add(key))
 		{
 			configManager.setConfiguration(RuneLiteConfig.GROUP_NAME, PLUGIN_LIST_KEY, Text.toCSV(plugins));
-			executor.submit(this::refreshPlugins);
+			executor.submit(this::refreshPluginsAndStatus);
 		}
 	}
 
@@ -417,13 +578,13 @@ public class ExternalPluginManager
 		if (plugins.remove(key))
 		{
 			configManager.setConfiguration(RuneLiteConfig.GROUP_NAME, PLUGIN_LIST_KEY, Text.toCSV(plugins));
-			executor.submit(this::refreshPlugins);
+			executor.submit(this::refreshPluginsAndStatus);
 		}
 	}
 
 	public void update()
 	{
-		executor.submit(this::refreshPlugins);
+		executor.submit(this::refreshPluginsAndStatus);
 	}
 
 	@Nullable

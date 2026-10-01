@@ -50,7 +50,8 @@ class PluginSearch
 	{
 		if (StringUtils.isBlank(query))
 		{
-			return Comparator.comparing(SearchablePlugin::isPinned, Comparator.reverseOrder())
+			return Comparator.comparing(SearchablePlugin::needsAttention, Comparator.reverseOrder())
+				.thenComparing(SearchablePlugin::isPinned, Comparator.reverseOrder())
 				.thenComparing(SearchablePlugin::getSearchableName);
 		}
 

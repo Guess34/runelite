@@ -132,6 +132,7 @@ import net.runelite.client.util.WinUtil;
 public class ClientUI
 {
 	private static final String CONFIG_GROUP = "runelite";
+	private static final int SIDEBAR_ICON_SIZE = 16;
 	private static final String CONFIG_CLIENT_BOUNDS = "clientBounds";
 	private static final String CONFIG_CLIENT_MAXIMIZED = "clientMaximized";
 	private static final String CONFIG_CLIENT_SIDEBAR_CLOSED = "clientSidebarClosed";
@@ -242,8 +243,7 @@ public class ClientUI
 			return;
 		}
 
-		final int TAB_SIZE = 16;
-		Icon icon = new ImageIcon(ImageUtil.resizeImage(navBtn.getIcon(), TAB_SIZE, TAB_SIZE));
+		Icon icon = new ImageIcon(ImageUtil.resizeImage(navBtn.getIcon(), SIDEBAR_ICON_SIZE, SIDEBAR_ICON_SIZE));
 
 		sidebar.insertTab(null, icon, navBtn.getPanel().getWrappedPanel(), navBtn.getTooltip(),
 			sidebarEntries.headSet(navBtn).size());
@@ -252,6 +252,23 @@ public class ClientUI
 		{
 			sidebar.setSelectedIndex(-1);
 		}
+	}
+
+	void updateNavigation(NavigationButton navBtn, BufferedImage icon, String tooltip)
+	{
+		if (navBtn.getPanel() == null)
+		{
+			return;
+		}
+
+		int index = sidebar.indexOfComponent(navBtn.getPanel().getWrappedPanel());
+		if (index == -1)
+		{
+			return;
+		}
+
+		sidebar.setIconAt(index, new ImageIcon(ImageUtil.resizeImage(icon, SIDEBAR_ICON_SIZE, SIDEBAR_ICON_SIZE)));
+		sidebar.setToolTipTextAt(index, tooltip);
 	}
 
 	void removeNavigation(NavigationButton navBtn)

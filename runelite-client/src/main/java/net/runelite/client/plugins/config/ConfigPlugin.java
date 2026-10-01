@@ -24,7 +24,11 @@
  */
 package net.runelite.client.plugins.config;
 
+import java.awt.Color;
+import java.awt.Graphics2D;
+import java.awt.RenderingHints;
 import java.awt.image.BufferedImage;
+import java.util.List;
 import javax.inject.Inject;
 import javax.inject.Provider;
 import javax.swing.SwingUtilities;
@@ -34,9 +38,13 @@ import net.runelite.client.config.ConfigManager;
 import net.runelite.client.config.RuneLiteConfig;
 import net.runelite.client.eventbus.Subscribe;
 import net.runelite.client.events.OverlayMenuClicked;
+import net.runelite.client.events.PluginHubStatusChanged;
+import net.runelite.client.externalplugins.ExternalPluginManager;
+import net.runelite.client.externalplugins.PluginHubStatus;
 import net.runelite.client.plugins.Plugin;
 import net.runelite.client.plugins.PluginDescriptor;
 import net.runelite.client.ui.ClientToolbar;
+import net.runelite.client.ui.ColorScheme;
 import net.runelite.client.ui.NavigationButton;
 import net.runelite.client.ui.overlay.Overlay;
 import net.runelite.client.ui.overlay.OverlayMenuEntry;
@@ -66,9 +74,27 @@ public class ConfigPlugin extends Plugin
 	@Inject
 	private ChatColorConfig chatColorConfig;
 
+	@Inject
+	private ExternalPluginManager externalPluginManager;
+
 	private TopLevelConfigPanel topLevelConfigPanel;
 
+	private static final String[][] BADGE_GLYPHS = {
+		{"###", "#.#", "#.#", "#.#", "###"},
+		{".#.", "##.", ".#.", ".#.", "###"},
+		{"###", "..#", "###", "#..", "###"},
+		{"###", "..#", ".##", "..#", "###"},
+		{"#.#", "#.#", "###", "..#", "..#"},
+		{"###", "#..", "###", "..#", "###"},
+		{"###", "#..", "###", "#.#", "###"},
+		{"###", "..#", ".#.", ".#.", ".#."},
+		{"###", "#.#", "###", "#.#", "###"},
+		{"###", "#.#", "###", "..#", "###"},
+		{".#.", ".#.", ".#.", "...", ".#."},
+	};
+
 	private NavigationButton navButton;
+	private BufferedImage icon;
 
 	@Override
 	protected void startUp() throws Exception
@@ -87,7 +113,7 @@ public class ConfigPlugin extends Plugin
 
 		topLevelConfigPanel = topLevelConfigPanelProvider.get();
 
-		final BufferedImage icon = ImageUtil.loadImageResource(getClass(), "config_icon.png");
+		icon = ImageUtil.loadImageResource(getClass(), "config_icon.png");
 
 		navButton = NavigationButton.builder()
 			.tooltip("Configuration")
@@ -97,12 +123,59 @@ public class ConfigPlugin extends Plugin
 			.build();
 
 		clientToolbar.addNavigation(navButton);
+		updateNavigationBadge();
 	}
 
 	@Override
 	protected void shutDown() throws Exception
 	{
 		clientToolbar.removeNavigation(navButton);
+	}
+
+	@Subscribe
+	public void onPluginHubStatusChanged(PluginHubStatusChanged event)
+	{
+		updateNavigationBadge();
+	}
+
+	private void updateNavigationBadge()
+	{
+		List<PluginHubStatus> status = externalPluginManager.getPluginHubStatus();
+		if (status.isEmpty())
+		{
+			clientToolbar.updateNavigation(navButton, icon, "Configuration");
+			return;
+		}
+
+		long problems = status.stream().filter(PluginHubStatus::isProblem).count();
+		String tooltip = "Configuration (" + status.size() + (status.size() == 1 ? " plugin needs" : " plugins need") + " attention)";
+		Color color = problems > 0 ? ColorScheme.PROGRESS_ERROR_COLOR : ColorScheme.PROGRESS_COMPLETE_COLOR;
+		clientToolbar.updateNavigation(navButton, badge(icon, status.size() > 9 ? 10 : status.size(), color), tooltip);
+	}
+
+	private static BufferedImage badge(BufferedImage base, int glyph, Color color)
+	{
+		BufferedImage img = new BufferedImage(16, 16, BufferedImage.TYPE_INT_ARGB);
+		Graphics2D g = img.createGraphics();
+		g.drawImage(ImageUtil.resizeImage(base, 16, 16), 0, 0, null);
+		g.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);
+		g.setColor(color);
+		g.fillOval(0, 0, 7, 7);
+		g.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_OFF);
+		g.setColor(Color.WHITE);
+		String[] rows = BADGE_GLYPHS[glyph];
+		for (int y = 0; y < rows.length; y++)
+		{
+			for (int x = 0; x < rows[y].length(); x++)
+			{
+				if (rows[y].charAt(x) == '#')
+				{
+					g.fillRect(2 + x, 1 + y, 1, 1);
+				}
+			}
+		}
+		g.dispose();
+		return img;
 	}
 
 	@Subscribe

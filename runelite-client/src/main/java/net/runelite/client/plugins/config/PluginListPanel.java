@@ -28,15 +28,22 @@ import com.google.common.collect.ImmutableList;
 import java.awt.BorderLayout;
 import java.awt.Component;
 import java.awt.Dimension;
+import java.awt.FlowLayout;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Comparator;
+import java.util.IdentityHashMap;
 import java.util.List;
+import java.util.Map;
+import java.util.function.Function;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
 import javax.inject.Inject;
 import javax.inject.Provider;
 import javax.inject.Singleton;
+import javax.swing.BorderFactory;
+import javax.swing.JButton;
+import javax.swing.JLabel;
 import javax.swing.JPanel;
 import javax.swing.JScrollPane;
 import javax.swing.ScrollPaneConstants;
@@ -55,8 +62,10 @@ import net.runelite.client.eventbus.EventBus;
 import net.runelite.client.eventbus.Subscribe;
 import net.runelite.client.events.ExternalPluginsChanged;
 import net.runelite.client.events.PluginChanged;
+import net.runelite.client.events.PluginHubStatusChanged;
 import net.runelite.client.events.ProfileChanged;
 import net.runelite.client.externalplugins.ExternalPluginManager;
+import net.runelite.client.externalplugins.PluginHubStatus;
 import net.runelite.client.plugins.Plugin;
 import net.runelite.client.plugins.PluginDescriptor;
 import net.runelite.client.plugins.PluginInstantiationException;
@@ -99,6 +108,10 @@ class PluginListPanel extends PluginPanel
 	private final IconTextField searchBar;
 	private final JScrollPane scrollPane;
 	private final FixedWidthPanel mainPanel;
+	private final JPanel statusBanner;
+	private final JLabel statusBannerText;
+	private final JButton updateAllButton;
+	private List<PluginHubStatus> dismissedStatus = Collections.emptyList();
 	private List<PluginListItem> pluginList;
 
 	@Inject
@@ -165,6 +178,36 @@ class PluginListPanel extends PluginPanel
 		topPanel.setBorder(new EmptyBorder(10, 10, 10, 10));
 		topPanel.setLayout(new BorderLayout(0, BORDER_OFFSET));
 		topPanel.add(searchBar, BorderLayout.CENTER);
+
+		statusBanner = new JPanel(new BorderLayout(0, 4));
+		statusBanner.setBackground(ColorScheme.DARKER_GRAY_COLOR);
+		statusBanner.setBorder(BorderFactory.createCompoundBorder(
+			BorderFactory.createMatteBorder(0, 3, 0, 0, ColorScheme.BRAND_ORANGE),
+			new EmptyBorder(6, 8, 6, 8)));
+		statusBannerText = new JLabel();
+		statusBannerText.setForeground(ColorScheme.BRAND_ORANGE);
+		statusBanner.add(statusBannerText, BorderLayout.NORTH);
+
+		JPanel bannerButtons = new JPanel(new FlowLayout(FlowLayout.LEFT, 0, 0));
+		bannerButtons.setOpaque(false);
+		updateAllButton = new JButton("Update all");
+		updateAllButton.addActionListener(e ->
+		{
+			updateAllButton.setText("Updating");
+			externalPluginManager.update();
+		});
+		bannerButtons.add(updateAllButton);
+		JButton dismissButton = new JButton("Dismiss");
+		dismissButton.addActionListener(e ->
+		{
+			dismissedStatus = externalPluginManager.getPluginHubStatus();
+			updateStatusBanner();
+		});
+		bannerButtons.add(dismissButton);
+		statusBanner.add(bannerButtons, BorderLayout.CENTER);
+		statusBanner.setVisible(false);
+		topPanel.add(statusBanner, BorderLayout.SOUTH);
+
 		add(topPanel, BorderLayout.NORTH);
 
 		mainPanel = new FixedWidthPanel();
@@ -184,10 +227,22 @@ class PluginListPanel extends PluginPanel
 	void rebuildPluginList()
 	{
 		final List<String> pinnedPlugins = getPinnedPluginNames();
+		final Map<String, PluginHubStatus> hubStatus = externalPluginManager.getPluginHubStatus().stream()
+			.collect(Collectors.toMap(PluginHubStatus::getInternalName, Function.identity(), (a, b) -> a));
+
+		final List<String> loadedHubNames = pluginManager.getPlugins().stream()
+			.map(p -> ExternalPluginManager.getInternalName(p.getClass()))
+			.collect(Collectors.toList());
+		final Map<PluginConfigurationDescriptor, PluginHubStatus> placeholders = new IdentityHashMap<>();
+		hubStatus.values().stream()
+			.filter(s -> !loadedHubNames.contains(s.getInternalName()))
+			.forEach(s -> placeholders.put(new PluginConfigurationDescriptor(s.getDisplayName(),
+				s.getReason() == null ? "" : s.getReason(), new String[0], null, null), s));
 
 		// populate pluginList with all non-hidden plugins
-		pluginList = Stream.concat(
+		pluginList = Stream.concat(Stream.concat(
 			fakePlugins.stream(),
+			placeholders.keySet().stream()),
 			pluginManager.getPlugins().stream()
 				.filter(plugin -> !plugin.getClass().getAnnotation(PluginDescriptor.class).hidden())
 				.map(plugin ->
@@ -211,7 +266,10 @@ class PluginListPanel extends PluginPanel
 		)
 			.map(desc ->
 			{
-				PluginListItem listItem = new PluginListItem(this, desc);
+				PluginHubStatus status = desc.getPlugin() != null
+					? hubStatus.get(desc.getInternalPluginHubName())
+					: placeholders.get(desc);
+				PluginListItem listItem = new PluginListItem(this, desc, status);
 				listItem.setPinned(pinnedPlugins.contains(desc.getName().replace(",", "")));
 				return listItem;
 			})
@@ -219,7 +277,37 @@ class PluginListPanel extends PluginPanel
 			.collect(Collectors.toList());
 
 		mainPanel.removeAll();
+		updateStatusBanner();
 		refresh();
+	}
+
+	private void updateStatusBanner()
+	{
+		List<PluginHubStatus> status = externalPluginManager.getPluginHubStatus();
+		if (status.isEmpty() || status.equals(dismissedStatus))
+		{
+			statusBanner.setVisible(false);
+			return;
+		}
+
+		long updates = status.stream().filter(s -> !s.isProblem()).count();
+		long problems = status.size() - updates;
+
+		List<String> parts = new ArrayList<>();
+		if (updates > 0)
+		{
+			parts.add(updates + (updates == 1 ? " update" : " updates"));
+		}
+		if (problems > 0)
+		{
+			parts.add(problems + (problems == 1 ? " broken plugin" : " broken plugins"));
+		}
+
+		statusBannerText.setText(String.join(", ", parts));
+		updateAllButton.setText("Update all");
+		updateAllButton.setVisible(updates > 0);
+		statusBanner.setVisible(true);
+		revalidate();
 	}
 
 	void addFakePlugin(PluginConfigurationDescriptor... descriptor)
@@ -370,6 +458,12 @@ class PluginListPanel extends PluginPanel
 
 	@Subscribe
 	private void onExternalPluginsChanged(ExternalPluginsChanged ev)
+	{
+		SwingUtilities.invokeLater(this::rebuildPluginList);
+	}
+
+	@Subscribe
+	private void onPluginHubStatusChanged(PluginHubStatusChanged ev)
 	{
 		SwingUtilities.invokeLater(this::rebuildPluginList);
 	}

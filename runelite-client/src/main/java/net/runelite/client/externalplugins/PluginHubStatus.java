@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2020, Jack Hodkinson <https://github.com/jrhodkinson>
+ * Copyright (c) 2026, Guess34
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -22,28 +22,30 @@
  * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
  * SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
-package net.runelite.client.plugins.config;
+package net.runelite.client.externalplugins;
 
-import java.util.List;
+import javax.annotation.Nullable;
+import lombok.Value;
 
-interface SearchablePlugin
+@Value
+public class PluginHubStatus
 {
-	String getSearchableName();
-
-	List<String> getKeywords();
-
-	default boolean isPinned()
+	public enum State
 	{
-		return false;
+		UPDATE_AVAILABLE,
+		UNAVAILABLE,
+		FAILED,
 	}
 
-	default int installs()
-	{
-		return 0;
-	}
+	String internalName;
+	String displayName;
+	State state;
 
-	default boolean needsAttention()
+	@Nullable
+	String reason;
+
+	public boolean isProblem()
 	{
-		return false;
+		return state != State.UPDATE_AVAILABLE;
 	}
 }

@@ -24,6 +24,7 @@
  */
 package net.runelite.client.ui;
 
+import java.awt.image.BufferedImage;
 import javax.inject.Inject;
 import javax.inject.Singleton;
 import javax.swing.SwingUtilities;
@@ -45,6 +46,11 @@ public class ClientToolbar
 	public void addNavigation(NavigationButton button)
 	{
 		SwingUtilities.invokeLater(() -> clientUI.addNavigation(button));
+	}
+
+	public void updateNavigation(NavigationButton button, BufferedImage icon, String tooltip)
+	{
+		SwingUtilities.invokeLater(() -> clientUI.updateNavigation(button, icon, tooltip));
 	}
 
 	public void removeNavigation(final NavigationButton button)

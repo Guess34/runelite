@@ -479,4 +479,15 @@ public interface RuneLiteConfig extends Config
 	{
 		return Keybind.ALT;
 	}
+
+	@ConfigItem(
+		keyName = "pluginHubStatusNotification",
+		name = "Plugin Hub updates",
+		description = "Notifies you when an installed Plugin Hub plugin has an update available or can no longer load.",
+		position = 53
+	)
+	default Notification pluginHubStatusNotification()
+	{
+		return Notification.ON;
+	}
 }
